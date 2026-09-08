@@ -1,4 +1,4 @@
-# 🌐 Smart DNS & Network Diagnostic Agent (Alpha Version)
+# 🌐 Smart DNS & Network Diagnostic Agent
 
 An AI-powered network troubleshooting agent built with Python, Streamlit, and AvalAI.
 
