@@ -1,0 +1,195 @@
+import os
+import json
+import streamlit as st
+from openai import OpenAI
+from agent_config import SYSTEM_PROMPT, TOOLS_SCHEMA
+from guardrails import validate_user_input
+from tools import check_dns_records, check_port_status, detect_cdn
+
+st.set_page_config(page_title="DNS & Network Diagnostic Agent", page_icon="🌐", layout="centered")
+
+st.markdown("""
+<style>
+    @import url('https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-font-face.css');
+
+    html, body, [class*="css"], .stMarkdown, p, div, h1, h2, h3, h4 {
+        font-family: 'Vazirmatn', sans-serif !important;
+    }
+
+    .stChatMessage, div[data-testid="stMarkdownContainer"] {
+        direction: rtl !important;
+        text-align: right !important;
+        line-height: 1.8 !important;
+    }
+
+    code {
+        direction: ltr !important;
+        display: inline-block;
+        font-family: 'Fira Code', monospace !important;
+        background: #1e293b !important;
+        color: #38bdf8 !important;
+        padding: 3px 8px !important;
+        border-radius: 6px !important;
+        font-weight: 600;
+    }
+
+    /* استایل جدول دارک تم */
+    table {
+        width: 100% !important;
+        direction: rtl !important;
+        border-collapse: separate !important;
+        border-spacing: 0 !important;
+        margin: 15px 0 !important;
+        border-radius: 10px !important;
+        overflow: hidden !important;
+        border: 1px solid #334155 !important;
+    }
+    th {
+        background: #2563eb !important;
+        color: #ffffff !important;
+        padding: 12px 14px !important;
+        font-size: 0.95rem !important;
+        font-weight: 700 !important;
+        border-bottom: 2px solid #1d4ed8 !important;
+    }
+    td {
+        padding: 12px 14px !important;
+        background-color: #1e293b !important;
+        color: #f8fafc !important;
+        font-weight: 500 !important;
+        border-bottom: 1px solid #334155 !important;
+    }
+    tr:last-child td {
+        border-bottom: none !important;
+    }
+    table td {
+            word-break: break-all !important;
+            max-width: 410px; /* حداکثر عرض سلول */
+            white-space: normal !important;
+        }
+    table td:nth-child(2) {
+            white-space: nowrap !important; /* جلوگیری از شکستن کلمات */
+            word-break: normal !important;  /* خنثی کردن استایل قبلی برای این ستون */
+            min-width: 110px;               /* حداقل عرض برای اینکه جا کم نیاورد */
+            text-align: center !important;
+        }
+    /* استایل پایه برای باکس وضعیت */
+    .status-box {
+        direction: rtl !important;
+        text-align: right !important;
+        padding: 14px 18px !important;
+        border-radius: 8px !important;
+        margin: 15px 0 !important;
+        font-weight: 500 !important;
+        line-height: 1.7 !important;
+    }
+
+    /* ۱. کادر سبز (سیستم کاملاً سالم / ۰ خطا) */
+    .status-success {
+        background-color: #064e3b !important;
+        border-right: 5px solid #10b981 !important;
+        color: #a7f3d0 !important;
+    }
+
+    /* ۲. کادر زرد (هشدار / ۱ خطا) */
+    .status-warning {
+        background-color: #451a03 !important;
+        border-right: 5px solid #f59e0b !important;
+        color: #fde68a !important;
+    }
+
+    /* ۳. کادر قرمز (بحرانی / بیشتر از ۱ خطا) */
+    .status-danger {
+        background-color: #450a0a !important;
+        border-right: 5px solid #ef4444 !important;
+        color: #fca5a5 !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+st.title("🌐 دستیار هوشمند عیب‌یابی شبکه و DNS")
+st.caption("Automated DNS records analysis, port status checks, and CDN detection")
+
+AVAILABLE_TOOLS = {
+    "check_dns_records": check_dns_records,
+    "check_port_status": check_port_status,
+    "detect_cdn": detect_cdn
+}
+
+api_key = os.getenv("AVALAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+
+if not api_key:
+    api_key = st.sidebar.text_input("Enter AvalAI / OpenAI API Key:", type="password")
+
+if st.sidebar.button("🗑️ پاکسازی گفتگو (Reset Chat)"):
+    st.session_state["messages"] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    st.rerun()
+
+if "messages" not in st.session_state:
+    st.session_state["messages"] = [
+        {"role": "system", "content": SYSTEM_PROMPT}
+    ]
+
+for msg in st.session_state.messages:
+    role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
+    content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+    
+    if role == "user":
+        st.chat_message("user").write(content)
+    elif role == "assistant" and content and not msg.get("tool_calls"):
+        st.chat_message("assistant").markdown(content, unsafe_allow_html=True)
+
+if user_input := st.chat_input("پیام خود یا نام دامنه را وارد کنید..."):
+    if not api_key:
+        st.error("Please enter an API key in the sidebar.")
+        st.stop()
+
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    st.chat_message("user").write(user_input)
+
+    client = OpenAI(
+        api_key=api_key,
+        base_url="https://api.avalai.ir/v1"
+    )
+
+    with st.chat_message("assistant"):
+        message_placeholder = st.empty()
+        
+        with st.spinner("🔍 در حال بررسی شبکه و تحلیل زیرساخت... لطفاً شکیبا باشید"):
+            while True:
+                try:
+                    response = client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=st.session_state.messages,
+                        tools=TOOLS_SCHEMA,
+                        tool_choice="auto"
+                except Exception as e:
+                    st.error(f"API Connection Error: {e}")
+                    break
+
+                response_message = response.choices[0].message
+                st.session_state.messages.append(response_message.model_dump())
+
+                if response_message.tool_calls:
+                    for tool_call in response_message.tool_calls:
+                        fn_name = tool_call.function.name
+                        try:
+                            fn_args = json.loads(tool_call.function.arguments)
+                        except Exception:
+                            fn_args = {}
+
+                        tool_func = AVAILABLE_TOOLS.get(fn_name)
+                        if tool_func:
+                            tool_output = tool_func(**fn_args)
+                        else:
+                            tool_output = {"error": "Tool not found"}
+
+                        st.session_state.messages.append({
+                            "tool_call_id": tool_call.id,
+                            "role": "tool",
+                            "name": fn_name,
+                            "content": json.dumps(tool_output)
+                        })
+                else:
+                    message_placeholder.markdown(response_message.content, unsafe_allow_html=True)
+                    break

@@ -4,13 +4,44 @@ import urllib.request
 import dns.resolver
 
 def check_dns_records(domain: str) -> dict:
-    records = {"A": [], "AAAA": [], "CNAME": [], "NS": [], "MX": [], "TXT": []}
+    """استعلام رکوردهای وب با پشتیبانی از نمایش کامل تمام NSها"""
+    records = {"A": [], "AAAA": [], "CNAME": [], "NS": []}
+    
+    resolver = dns.resolver.Resolver(configure=True)
+    resolver.timeout = 3
+    resolver.lifetime = 3
+
+    if domain.endswith('.ir'):
+        resolver.nameservers = ['185.51.200.2', '185.51.200.1', '1.1.1.1', '8.8.8.8']
+    else:
+        resolver.nameservers = ['8.8.8.8', '1.1.1.1', '4.2.2.4']
+
     for record_type in records.keys():
+        success = False
         try:
-            answers = dns.resolver.resolve(domain, record_type)
-            records[record_type] = [str(rdata) for rdata in answers]
+            answers = resolver.resolve(domain, record_type)
+            if record_type == "NS":
+                # استخراج تمام نیم‌سرورها به جای فقط یک مورد
+                records[record_type] = [str(rdata.target).rstrip('.') for rdata in answers]
+            else:
+                records[record_type] = [str(rdata) for rdata in answers]
+            success = True
         except Exception:
             pass
+
+        if not success and domain.endswith('.ir'):
+            try:
+                fallback_resolver = dns.resolver.Resolver(configure=True)
+                fallback_resolver.timeout = 2
+                fallback_resolver.lifetime = 2
+                answers = fallback_resolver.resolve(domain, record_type)
+                if record_type == "NS":
+                    records[record_type] = [str(rdata.target).rstrip('.') for rdata in answers]
+                else:
+                    records[record_type] = [str(rdata) for rdata in answers]
+            except Exception:
+                pass
+
     return records
 
 def check_port_status(domain: str, port: int) -> dict:
@@ -36,7 +67,6 @@ def detect_cdn(domain: str) -> dict:
     detected_cdns = []
     server_header = "Unknown"
 
-    # ۱. بررسی نام‌سرورها (NS Records) - حیاتی برای Apex Domainها
     try:
         ns_answers = dns.resolver.resolve(domain, 'NS')
         for rdata in ns_answers:
@@ -48,7 +78,6 @@ def detect_cdn(domain: str) -> dict:
     except Exception:
         pass
 
-    # ۲. بررسی CNAMEهای دی‌ان‌اس
     try:
         cname_answers = dns.resolver.resolve(domain, 'CNAME')
         for rdata in cname_answers:
@@ -60,7 +89,6 @@ def detect_cdn(domain: str) -> dict:
     except Exception:
         pass
 
-    # ۳. بررسی تمام هدرهای پاسخ HTTP و HTTPS
     for proto in ["https://", "http://"]:
         try:
             req = urllib.request.Request(
@@ -74,8 +102,7 @@ def detect_cdn(domain: str) -> dict:
             with urllib.request.urlopen(req, timeout=4, context=ctx) as response:
                 headers = dict(response.headers)
                 server_header = headers.get("Server", headers.get("server", "Unknown"))
-                
-                # بررسی کل کلیدها و مقادیر هدرها
+
                 headers_str = str(headers).lower()
                 for provider, sigs in cdn_signatures.items():
                     if any(sig in headers_str for sig in sigs):

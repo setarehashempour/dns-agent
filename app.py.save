@@ -1,0 +1,108 @@
+import os
+import json
+import streamlit as st
+from openai import OpenAI
+from agent_config import SYSTEM_PROMPT, TOOLS_SCHEMA
+from tools import check_dns_records, check_port_status, detect_cdn
+
+st.set_page_config(page_title="DNS & Network Diagnostic Agent", page_icon="🌐", layout="centered")
+
+# تزریق استایل CSS برای اصلاح چیدمان راست‌به‌چپ (RTL)
+st.markdown("""
+<style>
+    .stChatMessage, .stMarkdown, p, div[data-testid="stMarkdownContainer"] {
+        direction: rtl !important;
+        text-align: right !important;
+    }
+    ul, ol {
+        direction: rtl !important;
+        text-align: right !important;
+        padding-right: 20px !important;
+    }
+    code {
+        direction: ltr !important;
+        display: inline-block;
+    }
+</style>
+    "check_dns_records": check_dns_records,
+    "check_port_status": check_port_status,
+    "detect_cdn": detect_cdn
+}
+
+api_key = os.getenv("AVALAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+
+if not api_key:
+    api_key = st.sidebar.text_input("Enter AvalAI / OpenAI API Key:", type="password")
+
+if "messages" not in st.session_state:
+    st.session_state["messages"] = [
+        {"role": "system", "content": SYSTEM_PROMPT}
+    ]
+
+# نمایش تاریخچه پیام‌ها با پشتیبانی از هر دو حالت Dict و Object
+for msg in st.session_state.messages:
+    role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
+    content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+    
+    if role == "user":
+        st.chat_message("user").write(content)
+    elif role == "assistant" and content:
+        st.chat_message("assistant").write(content)
+
+if user_input := st.chat_input("پیام خود یا نام دامنه را وارد کنید..."):
+    if not api_key:
+        st.error("Please enter an API key in the sidebar.")
+        st.stop()
+
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    st.chat_message("user").write(user_input)
+
+    client = OpenAI(
+        api_key=api_key,
+        base_url="https://api.avalai.ir/v1"
+    )
+
+    with st.chat_message("assistant"):
+        message_placeholder = st.empty()
+        
+        while True:
+            try:
+                response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=st.session_state.messages,
+                    tools=TOOLS_SCHEMA,
+                    tool_choice="auto"
+                )
+            except Exception as e:
+                st.error(f"API Connection Error: {e}")
+                break
+
+            response_message = response.choices[0].message
+            # تبدیل پیام پاسخ به دیکشنری استاندارد جهت جلوگیری از خطای Subscriptable
+            st.session_state.messages.append(response_message.model_dump())
+
+            if response_message.tool_calls:
+                for tool_call in response_message.tool_calls:
+                    fn_name = tool_call.function.name
+                    fn_args = json.loads(tool_call.function.arguments)
+
+                    with st.status(f"🛠️ Running tool: `{fn_name}`...", expanded=True) as status:
+                        st.write(f"**Arguments:** {fn_args}")
+                        tool_func = AVAILABLE_TOOLS.get(fn_name)
+                        if tool_func:
+                            tool_output = tool_func(**fn_args)
+                            st.write(f"**Output:** {tool_output}")
+                            status.update(label=f"✅ Tool `{fn_name}` executed successfully.", state="complete")
+                        else:
+                            tool_output = {"error": "Tool not found"}
+                            status.update(label=f"❌ Failed to execute tool `{fn_name}`", state="error")
+
+                    st.session_state.messages.append({
+                        "tool_call_id": tool_call.id,
+                        "role": "tool",
+                        "name": fn_name,
+                        "content": json.dumps(tool_output)
+                    })
+            else:
+                message_placeholder.markdown(response_message.content)
+                break
